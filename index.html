@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f1a">
+<meta name="description" content="See where the sun rises, travels and sets in any month, through your phone camera.">
+<title>Sun Tracker</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{--bg:#0b0f1a;--fg:#f4f1ea;--muted:#a3abbd;--sun:#ffb627;--today:#7cc4ff;--chip:rgba(255,255,255,.12);--panel:rgba(11,15,26,.78)}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,Roboto,sans-serif;overflow:hidden;overscroll-behavior:none;-webkit-tap-highlight-color:transparent;user-select:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+#video,#sky{position:fixed;inset:0;width:100%;height:100%}
+#video{object-fit:cover;display:none;background:#000}
+#sky{touch-action:none}
+.bar{position:fixed;left:0;right:0;display:flex;gap:8px;padding:10px 16px;pointer-events:none}
+.bar>*{pointer-events:auto}
+#top{top:0;padding-top:max(10px,env(safe-area-inset-top));justify-content:space-between;align-items:center}
+.pill{background:var(--panel);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-radius:999px;padding:0 14px;min-height:40px;display:inline-flex;align-items:center;gap:6px;font-size:14px}
+#align[hidden],#hint[hidden]{display:none}
+#bottom{bottom:0;flex-direction:column;padding:12px 0 max(12px,env(safe-area-inset-bottom));background:linear-gradient(transparent,var(--bg) 40%);gap:10px}
+#info{padding:0 16px;text-align:center;font-size:14px;font-variant-numeric:tabular-nums}
+#info b{color:var(--sun);font-weight:600}
+#info small{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+#months{display:flex;gap:6px;overflow-x:auto;padding:0 16px;scrollbar-width:none;scroll-snap-type:x proximity}
+#months::-webkit-scrollbar{display:none}
+#months button{flex:0 0 auto;min-width:52px;min-height:44px;border-radius:12px;background:var(--chip);font-weight:500;scroll-snap-align:center}
+#months button[aria-pressed=true]{background:var(--sun);color:#1a1200}
+#hint{position:fixed;top:calc(max(10px,env(safe-area-inset-top)) + 52px);left:16px;right:16px;text-align:center}
+#hint .pill{display:inline-flex}
+#hint button{text-decoration:underline;color:var(--muted)}
+#toast{position:fixed;left:16px;right:16px;top:40%;text-align:center;pointer-events:none;opacity:0;transition:opacity .3s}
+#toast.on{opacity:1}
+#toast span{background:var(--panel);padding:10px 14px;border-radius:12px;display:inline-block}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center;background:radial-gradient(circle at 50% 35%,#3a2a12,var(--bg) 60%)}
+#start[hidden]{display:none}
+#start img{width:96px;height:96px}
+#start h1{font-size:28px}
+#start p{color:var(--muted);max-width:320px}
+#go{background:var(--sun);color:#1a1200;font-weight:600;font-size:17px;padding:14px 32px;border-radius:999px;min-height:48px}
+#flat{color:var(--muted);text-decoration:underline;min-height:44px}
+</style>
+</head>
+<body>
+<video id="video" playsinline muted></video>
+<canvas id="sky"></canvas>
+
+<div id="top" class="bar">
+  <button id="loc" class="pill" aria-label="Change location">📍 <span>Locating…</span></button>
+  <button id="align" class="pill" hidden>🎯 Align</button>
+</div>
+<div id="hint" hidden><span class="pill">Tap the real sun to align the compass · <button id="reset">Reset</button></span></div>
+
+<div id="bottom" class="bar">
+  <div id="info"></div>
+  <div id="months" role="group" aria-label="Month"></div>
+</div>
+
+<div id="toast"><span></span></div>
+
+<div id="start">
+  <img src="icon.svg" alt="">
+  <h1>Sun Tracker</h1>
+  <p>See where the sun rises, travels and sets in any month, drawn over your camera view.</p>
+  <button id="go">Start AR</button>
+  <button id="flat">View without camera</button>
+  <p style="font-size:12px">Uses your camera, location and compass. Nothing leaves your phone.</p>
+</div>
+
+<script src="suncalc.js"></script>
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const D2R = Math.PI / 180, TAU = Math.PI * 2;
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+const CAM_FOV = 66;  // assumed field of view along the camera image's long side, degrees
+const FLAT_FOV = 100; // vertical field of view in the no-camera sky view
+
+const video = $('#video'), canvas = $('#sky'), ctx = canvas.getContext('2d');
+const S = {
+  month: new Date().getMonth(), lat: null, lon: null,
+  mode: 'start',          // start | ar | flat
+  R: null,                // smoothed device-to-world rotation matrix (row-major 3x3)
+  sensor: false, cam: false, offset: 0, aligning: false,
+  view: { h: 180, p: 25 }, // heading/pitch in flat mode
+  paths: null,
+};
+
+// ---------- persistence (per-device convenience only) ----------
+try {
+  const saved = JSON.parse(localStorage.getItem('suntracker') || '{}');
+  if (typeof saved.lat === 'number') { S.lat = saved.lat; S.lon = saved.lon; }
+  if (typeof saved.offset === 'number') S.offset = saved.offset;
+} catch (e) {}
+function save() {
+  try { localStorage.setItem('suntracker', JSON.stringify({ lat: S.lat, lon: S.lon, offset: S.offset })); } catch (e) {}
+}
+
+// ---------- sun ----------
+function sunAt(date) {
+  const p = SunCalc.getPosition(date, S.lat, S.lon);
+  return { az: (p.azimuth + Math.PI) % TAU, alt: p.altitude }; // az: compass bearing from north
+}
+function dayPath(y, m, d) {
+  const t = SunCalc.getTimes(new Date(y, m, d, 12), S.lat, S.lon);
+  const noon = sunAt(t.solarNoon);
+  let start, end, polar = null;
+  if (!isNaN(t.sunrise) && !isNaN(t.sunset)) { start = +t.sunrise; end = +t.sunset; }
+  else if (noon.alt > 0) { polar = 'day'; start = +new Date(y, m, d); end = +new Date(y, m, d + 1); }
+  else return { polar: 'night', pts: [], hours: [], noon };
+  const pts = [];
+  for (let ts = start; ts < end; ts += 6e5) pts.push(sunAt(new Date(ts)));
+  pts.push(sunAt(new Date(end)));
+  const hours = [], h = new Date(start);
+  h.setMinutes(60, 0, 0);
+  for (; +h < end; h.setHours(h.getHours() + 1)) hours.push({ ...sunAt(h), label: String(h.getHours()).padStart(2, '0') });
+  return { polar, pts, hours, noon, rise: polar ? null : t.sunrise, set: polar ? null : t.sunset,
+           riseAz: polar ? null : sunAt(t.sunrise).az, setAz: polar ? null : sunAt(t.sunset).az };
+}
+function compute() {
+  if (S.lat == null) return;
+  const now = new Date(), y = now.getFullYear();
+  S.paths = { sel: dayPath(y, S.month, 21), today: dayPath(y, now.getMonth(), now.getDate()) };
+  renderInfo();
+}
+
+// ---------- geometry ----------
+// W3C DeviceOrientation: R = Rz(alpha)·Rx(beta)·Ry(gamma) maps device coords to East-North-Up.
+function rotation(a, b, g) {
+  a *= D2R; b *= D2R; g *= D2R;
+  const cA = Math.cos(a), sA = Math.sin(a), cB = Math.cos(b), sB = Math.sin(b), cG = Math.cos(g), sG = Math.sin(g);
+  return [cA*cG - sA*sB*sG, -cB*sA, cG*sA*sB + cA*sG,
+          cG*sA + cA*sB*sG,  cA*cB, sA*sG - cA*cG*sB,
+          -cB*sG,            sB,    cB*cG];
+}
+function enu(az, alt) {
+  const a = az + (S.mode === 'ar' ? S.offset : 0), c = Math.cos(alt);
+  return [Math.sin(a) * c, Math.cos(a) * c, Math.sin(alt)];
+}
+function screenAngle() { return ((screen.orientation && screen.orientation.angle) || window.orientation || 0) * D2R; }
+
+let W = 0, H = 0, F = 1;
+function focal() {
+  if (S.mode === 'ar' && S.cam && video.videoWidth) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const scale = Math.max(W / vw, H / vh); // object-fit: cover
+    return scale * (Math.max(vw, vh) / 2) / Math.tan(CAM_FOV / 2 * D2R);
+  }
+  return (H / 2) / Math.tan(FLAT_FOV / 2 * D2R);
+}
+// World direction -> screen point. Camera looks along device -Z.
+function project(v) {
+  const R = S.R;
+  const x = R[0]*v[0] + R[3]*v[1] + R[6]*v[2];
+  const y = R[1]*v[0] + R[4]*v[1] + R[7]*v[2];
+  const z = R[2]*v[0] + R[5]*v[1] + R[8]*v[2];
+  const th = screenAngle(), c = Math.cos(th), s = Math.sin(th);
+  const xs = x*c - y*s, ys = x*s + y*c;
+  if (z > -0.05) return { behind: true, dx: xs, dy: -ys };
+  return { x: W/2 + F * xs / -z, y: H/2 - F * ys / -z };
+}
+// Screen point -> compass bearing (used for alignment)
+function bearingAt(px, py) {
+  const th = screenAngle(), c = Math.cos(th), s = Math.sin(th);
+  const xs = (px - W/2) / F, ys = -(py - H/2) / F;
+  const d = [xs*c + ys*s, -xs*s + ys*c, -1], R = S.R;
+  const e = R[0]*d[0] + R[1]*d[1] + R[2]*d[2], n = R[3]*d[0] + R[4]*d[1] + R[5]*d[2];
+  return Math.atan2(e, n);
+}
+
+// ---------- drawing ----------
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function line(points, style, width, dash) {
+  ctx.strokeStyle = style; ctx.lineWidth = width; ctx.setLineDash(dash || []);
+  ctx.beginPath();
+  let pen = false, last = null;
+  for (const p of points) {
+    const q = project(enu(p.az, p.alt));
+    if (q.behind || (last && Math.hypot(q.x - last.x, q.y - last.y) > W * 2)) { pen = false; last = null; continue; }
+    pen ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y);
+    pen = true; last = q;
+  }
+  ctx.stroke(); ctx.setLineDash([]);
+}
+function label(text, x, y, color, size, align) {
+  ctx.font = `600 ${size || 12}px system-ui,Roboto,sans-serif`;
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,.7)'; ctx.strokeText(text, x, y);
+  ctx.fillStyle = color; ctx.fillText(text, x, y);
+}
+function dot(q, r, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, TAU); ctx.fill(); }
+const onScreen = q => !q.behind && q.x > 0 && q.x < W && q.y > 0 && q.y < H;
+
+function draw() {
+  requestAnimationFrame(draw);
+  ctx.clearRect(0, 0, W, H);
+  if (S.mode === 'start') return;
+  if (S.mode === 'flat') S.R = rotation(-S.view.h, 90 + S.view.p, 0);
+  if (!S.R) return;
+  F = focal();
+
+  if (!S.cam) { // painted sky + ground when there's no camera image
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0a1430'); g.addColorStop(1, '#2b4a7a');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    if (S.mode === 'flat') {
+      const hz = project(enu(S.view.h * D2R, 0));
+      if (!hz.behind) { ctx.fillStyle = '#1b1d22'; ctx.fillRect(0, hz.y, W, H - hz.y); }
+    }
+  }
+
+  // horizon + compass points
+  const ring = [];
+  for (let a = 0; a <= 360; a += 3) ring.push({ az: a * D2R, alt: 0 });
+  line(ring, 'rgba(255,255,255,.55)', 1.5);
+  for (let i = 0; i < 16; i += 2) {
+    const q = project(enu(i * 22.5 * D2R, 0));
+    if (onScreen(q)) label(DIRS[i], q.x, q.y + 14, i % 4 ? 'rgba(255,255,255,.7)' : '#fff', i % 4 ? 12 : 15);
+  }
+  if (S.lat == null || !S.paths) return;
+
+  const { sel, today } = S.paths;
+  if (today.pts.length) line(today.pts, 'rgba(124,196,255,.8)', 2, [6, 6]);
+  if (sel.pts.length) {
+    ctx.shadowColor = 'rgba(255,182,39,.8)'; ctx.shadowBlur = 8;
+    line(sel.pts, '#ffb627', 3.5);
+    ctx.shadowBlur = 0;
+    for (const h of sel.hours) {
+      const q = project(enu(h.az, h.alt));
+      if (!onScreen(q)) continue;
+      dot(q, 4, '#fff'); label(h.label, q.x, q.y - 13, '#fff');
+    }
+    if (!sel.polar) {
+      for (const [p, t, arrow] of [[sel.pts[0], sel.rise, '↑'], [sel.pts[sel.pts.length - 1], sel.set, '↓']]) {
+        const q = project(enu(p.az, p.alt));
+        if (!onScreen(q)) continue;
+        dot(q, 7, '#ffb627'); label(`${arrow} ${hm(t)}`, q.x, q.y + 18, '#ffb627', 14);
+      }
+    }
+  }
+
+  // the sun right now
+  const now = sunAt(new Date());
+  const qs = project(enu(now.az, now.alt));
+  if (onScreen(qs) && now.alt > -0.02) {
+    ctx.shadowColor = '#ffd56b'; ctx.shadowBlur = 20;
+    dot(qs, 11, '#ffe9a8'); ctx.shadowBlur = 0;
+    label('now', qs.x, qs.y + 22, '#ffe9a8');
+  }
+
+  // arrow toward the selected path when it's out of view
+  if (sel.pts.length && !sel.pts.some(p => onScreen(project(enu(p.az, p.alt))))) {
+    const q = project(enu(sel.noon.az, Math.max(sel.noon.alt, 0)));
+    const dx = q.behind ? q.dx : q.x - W/2, dy = q.behind ? q.dy : q.y - H/2;
+    const k = Math.min((W/2 - 30) / Math.abs(dx || 1e-6), (H/2 - 150) / Math.abs(dy || 1e-6));
+    const x = W/2 + dx * k, y = H/2 + dy * k, ang = Math.atan2(dy, dx);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+    ctx.fillStyle = '#ffb627'; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.fill();
+    ctx.restore();
+    label(`${MONTHS[S.month]} path`, x - Math.cos(ang) * 26, y - Math.sin(ang) * 26, '#ffb627');
+  }
+}
+
+// ---------- UI ----------
+const hm = d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+const dir = az => `${DIRS[Math.round(az / (TAU / 16)) % 16]} ${Math.round(az / D2R)}°`;
+function renderInfo() {
+  const p = S.paths && S.paths.sel, info = $('#info'), name = MONTHS[S.month];
+  if (!p) { info.innerHTML = '<small>Waiting for location…</small>'; return; }
+  const maxAlt = `max ${Math.round(p.noon.alt / D2R)}°`;
+  if (p.polar === 'night') info.innerHTML = `<b>${name} 21</b> · the sun doesn't rise<small>polar night</small>`;
+  else if (p.polar === 'day') info.innerHTML = `<b>${name} 21</b> · midnight sun · ${maxAlt}<small>the sun doesn't set</small>`;
+  else {
+    const len = (p.set - p.rise) / 6e4;
+    info.innerHTML = `<b>${name} 21</b> ↑ ${hm(p.rise)} ${dir(p.riseAz)} · ↓ ${hm(p.set)} ${dir(p.setAz)}` +
+      `<small>${Math.floor(len / 60)}h ${String(Math.round(len % 60)).padStart(2, '0')}m daylight · ${maxAlt} · <span style="color:var(--sun)">━</span> ${name} &nbsp;<span style="color:var(--today)">╍</span> today</small>`;
+  }
+}
+function renderMonths() {
+  const box = $('#months');
+  box.innerHTML = MONTHS.map((m, i) => `<button data-m="${i}" aria-pressed="${i === S.month}">${m}</button>`).join('');
+  box.onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    S.month = +b.dataset.m;
+    box.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b));
+    b.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+    compute();
+  };
+  box.children[S.month].scrollIntoView({ inline: 'center', block: 'nearest' });
+}
+let toastTimer;
+function toast(msg, ms) {
+  const t = $('#toast'); t.firstChild.textContent = msg; t.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), ms || 3000);
+}
+function setLoc(lat, lon) {
+  S.lat = lat; S.lon = lon; save();
+  $('#loc span').textContent = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+  compute();
+}
+function locate() {
+  if (S.lat != null) setLoc(S.lat, S.lon);
+  const fail = () => {
+    if (S.lat == null) { $('#loc span').textContent = 'Set location'; toast('Location unavailable. Tap 📍 to enter it.', 4000); }
+    else toast('Using last known location');
+  };
+  if (!navigator.geolocation) return fail();
+  navigator.geolocation.getCurrentPosition(p => setLoc(p.coords.latitude, p.coords.longitude), fail,
+    { timeout: 15000, maximumAge: 6e5 });
+}
+$('#loc').onclick = () => {
+  const v = prompt('Latitude, longitude (e.g. 57.70, 11.97)', S.lat != null ? `${S.lat.toFixed(4)}, ${S.lon.toFixed(4)}` : '');
+  if (!v) return;
+  const [a, b] = v.split(/[,\s]+/).map(Number);
+  if (Math.abs(a) <= 90 && Math.abs(b) <= 180) setLoc(a, b); else toast('Couldn’t read that location');
+};
+
+// ---------- sensors & camera ----------
+function onOrient(e) {
+  let a = e.alpha;
+  if (e.webkitCompassHeading != null) a = 360 - e.webkitCompassHeading; // iOS
+  else if (e.type === 'deviceorientation' && !e.absolute) return;     // relative only: no use
+  if (a == null || e.beta == null) return;
+  const m = rotation(a, e.beta, e.gamma);
+  if (!S.R) S.R = m; else for (let i = 0; i < 9; i++) S.R[i] += (m[i] - S.R[i]) * 0.2;
+  S.sensor = true;
+}
+async function startAR() {
+  S.mode = 'ar';
+  try { if (window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission(); } catch (e) {}
+  addEventListener('ondeviceorientationabsolute' in window ? 'deviceorientationabsolute' : 'deviceorientation', onOrient);
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    video.srcObject = stream; await video.play();
+    video.style.display = 'block'; S.cam = true;
+  } catch (e) { toast('Camera unavailable, showing the painted sky'); }
+  try { await navigator.wakeLock.request('screen'); } catch (e) {}
+  setTimeout(() => {
+    if (S.sensor) { $('#align').hidden = false; return; }
+    startFlat();
+    toast('No compass found. Drag to look around.', 4000);
+  }, 1500);
+}
+function startFlat() {
+  S.mode = 'flat'; S.cam = false;
+  if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+  video.style.display = 'none'; $('#align').hidden = true;
+}
+function begin(ar) {
+  $('#start').hidden = true;
+  locate();
+  ar ? startAR() : startFlat();
+}
+$('#go').onclick = () => begin(true);
+$('#flat').onclick = () => begin(false);
+
+// alignment: tap the real sun, correct the compass heading to match
+$('#align').onclick = () => {
+  if (S.lat == null) return toast('Set a location first');
+  if (sunAt(new Date()).alt < 0) return toast('The sun is below the horizon right now');
+  S.aligning = !S.aligning; $('#hint').hidden = !S.aligning;
+};
+$('#reset').onclick = () => { S.offset = 0; save(); S.aligning = false; $('#hint').hidden = true; toast('Alignment reset'); };
+
+// pointer: tap to align (AR) or drag to look around (flat)
+let drag = null;
+canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, h: S.view.h, p: S.view.p }; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', e => {
+  if (!drag || S.mode !== 'flat') return;
+  const k = FLAT_FOV / H;
+  S.view.h = ((drag.h - (e.clientX - drag.x) * k) % 360 + 360) % 360;
+  S.view.p = Math.max(-30, Math.min(85, drag.p + (e.clientY - drag.y) * k));
+});
+canvas.addEventListener('pointerup', e => {
+  const moved = drag && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 8;
+  drag = null;
+  if (moved || !S.aligning || !S.R) return;
+  const sun = sunAt(new Date());
+  const off = bearingAt(e.clientX, e.clientY) - sun.az;
+  S.offset = Math.atan2(Math.sin(off), Math.cos(off));
+  save(); S.aligning = false; $('#hint').hidden = true;
+  toast(`Aligned (${Math.round(S.offset / D2R)}° correction)`);
+});
+
+addEventListener('resize', resize);
+resize(); renderMonths(); renderInfo(); draw();
+setInterval(compute, 60000); // keep "today" and "now" fresh
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>

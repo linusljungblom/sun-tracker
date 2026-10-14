@@ -1,6 +1,6 @@
 # Sun Tracker
 
-A tiny mobile web app that draws the sun's path over your phone's camera view, so you can see where the sun rises, travels and sets in any month of the year. Pick a month at the bottom: the orange line is that month's path (on the 21st, so June and December show the solstices), the dashed blue line is today, and the glowing disc is the sun right now.
+A tiny mobile web app that draws the sun's path over your phone's camera view, so you can see where the sun is at any hour, and its whole path through the day, in any month of the year. Pick a month and drag the time slider: the big sun shows where the sun is at that time, and the orange line is its whole path that day (the 21st, so June and December show the solstices) with hour marks. The dashed blue line is today and the small disc is the sun right now. **Now** resets the slider to the current time.
 
 **Open:** https://linusljungblom.github.io/sun-tracker/ in Chrome on Android, tap **Start AR**, and allow camera, location and motion sensors. Use *Add to Home screen* to install it as an app; it works offline after the first visit.
 

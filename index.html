@@ -26,6 +26,10 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 #info{padding:0 16px;text-align:center;font-size:14px;font-variant-numeric:tabular-nums}
 #info b{color:var(--sun);font-weight:600}
 #info small{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+#time{display:flex;align-items:center;gap:10px;padding:0 16px}
+#clock{font-weight:600;font-variant-numeric:tabular-nums;min-width:50px;color:var(--sun);font-size:18px}
+#slider{flex:1;min-width:0;height:44px;accent-color:var(--sun)}
+#now{min-height:44px;padding:0 12px;border-radius:12px;background:var(--chip);font-size:14px}
 #months{display:flex;gap:6px;overflow-x:auto;padding:0 16px;scrollbar-width:none;scroll-snap-type:x proximity}
 #months::-webkit-scrollbar{display:none}
 #months button{flex:0 0 auto;min-width:52px;min-height:44px;border-radius:12px;background:var(--chip);font-weight:500;scroll-snap-align:center}
@@ -57,6 +61,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 
 <div id="bottom" class="bar">
   <div id="info"></div>
+  <div id="time"><output id="clock">12:00</output><input id="slider" type="range" min="0" max="1435" step="5" aria-label="Time of day"><button id="now">Now</button></div>
   <div id="months" role="group" aria-label="Month"></div>
 </div>
 
@@ -65,7 +70,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 <div id="start">
   <img src="icon.svg" alt="">
   <h1>Sun Tracker</h1>
-  <p>See where the sun rises, travels and sets in any month, drawn over your camera view.</p>
+  <p>See where the sun is at any hour, and its whole path across the sky, in any month. Drawn over your camera view.</p>
   <button id="go">Start AR</button>
   <button id="flat">View without camera</button>
   <p style="font-size:12px">Uses your camera, location and compass. Nothing leaves your phone.</p>
@@ -84,6 +89,7 @@ const FLAT_FOV = 100; // vertical field of view in the no-camera sky view
 const video = $('#video'), canvas = $('#sky'), ctx = canvas.getContext('2d');
 const S = {
   month: new Date().getMonth(), lat: null, lon: null,
+  minutes: nowMinutes(),  // selected time of day
   mode: 'start',          // start | ar | flat
   R: null,                // smoothed device-to-world rotation matrix (row-major 3x3)
   sensor: false, cam: false, offset: 0, aligning: false,
@@ -102,6 +108,8 @@ function save() {
 }
 
 // ---------- sun ----------
+function nowMinutes() { const d = new Date(); return Math.round((d.getHours() * 60 + d.getMinutes()) / 5) * 5 % 1440; }
+function selDate() { return new Date(new Date().getFullYear(), S.month, 21, 0, S.minutes); }
 function sunAt(date) {
   const p = SunCalc.getPosition(date, S.lat, S.lon);
   return { az: (p.azimuth + Math.PI) % TAU, alt: p.altitude }; // az: compass bearing from north
@@ -230,6 +238,7 @@ function draw() {
   if (S.lat == null || !S.paths) return;
 
   const { sel, today } = S.paths;
+  const at = sunAt(selDate()), qa = project(enu(at.az, at.alt));
   if (today.pts.length) line(today.pts, 'rgba(124,196,255,.8)', 2, [6, 6]);
   if (sel.pts.length) {
     ctx.shadowColor = 'rgba(255,182,39,.8)'; ctx.shadowBlur = 8;
@@ -237,7 +246,7 @@ function draw() {
     ctx.shadowBlur = 0;
     for (const h of sel.hours) {
       const q = project(enu(h.az, h.alt));
-      if (!onScreen(q)) continue;
+      if (!onScreen(q) || (onScreen(qa) && Math.hypot(q.x - qa.x, q.y - qa.y) < 30)) continue;
       dot(q, 4, '#fff'); label(h.label, q.x, q.y - 13, '#fff');
     }
     if (!sel.polar) {
@@ -249,43 +258,52 @@ function draw() {
     }
   }
 
-  // the sun right now
+  // the sun right now (small) and at the selected time (big)
   const now = sunAt(new Date());
-  const qs = project(enu(now.az, now.alt));
-  if (onScreen(qs) && now.alt > -0.02) {
-    ctx.shadowColor = '#ffd56b'; ctx.shadowBlur = 20;
-    dot(qs, 11, '#ffe9a8'); ctx.shadowBlur = 0;
-    label('now', qs.x, qs.y + 22, '#ffe9a8');
+  const qn = project(enu(now.az, now.alt));
+  if (onScreen(qn) && now.alt > -0.02) { dot(qn, 6, '#bfe3ff'); label('now', qn.x, qn.y + 16, '#bfe3ff'); }
+  if (onScreen(qa)) {
+    ctx.globalAlpha = at.alt < 0 ? 0.45 : 1;
+    ctx.shadowColor = '#ffd56b'; ctx.shadowBlur = 24;
+    dot(qa, 14, '#ffd56b'); ctx.shadowBlur = 0;
+    label(clock(), qa.x, qa.y + 28, '#fff', 15);
+    ctx.globalAlpha = 1;
   }
 
-  // arrow toward the selected path when it's out of view
-  if (sel.pts.length && !sel.pts.some(p => onScreen(project(enu(p.az, p.alt))))) {
-    const q = project(enu(sel.noon.az, Math.max(sel.noon.alt, 0)));
-    const dx = q.behind ? q.dx : q.x - W/2, dy = q.behind ? q.dy : q.y - H/2;
-    const k = Math.min((W/2 - 30) / Math.abs(dx || 1e-6), (H/2 - 150) / Math.abs(dy || 1e-6));
+  // arrow toward the selected-time sun when it's out of view
+  if (!onScreen(qa)) {
+    const dx = qa.behind ? qa.dx : qa.x - W/2, dy = qa.behind ? qa.dy : qa.y - H/2;
+    const k = Math.min((W/2 - 30) / Math.abs(dx || 1e-6), (H/2 - 200) / Math.abs(dy || 1e-6));
     const x = W/2 + dx * k, y = H/2 + dy * k, ang = Math.atan2(dy, dx);
     ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
     ctx.fillStyle = '#ffb627'; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.fill();
     ctx.restore();
-    label(`${MONTHS[S.month]} path`, x - Math.cos(ang) * 26, y - Math.sin(ang) * 26, '#ffb627');
+    label(`sun ${clock()}`, x - Math.cos(ang) * 30, y - Math.sin(ang) * 26, '#ffb627');
   }
 }
 
 // ---------- UI ----------
 const hm = d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 const dir = az => `${DIRS[Math.round(az / (TAU / 16)) % 16]} ${Math.round(az / D2R)}°`;
+const clock = () => `${String(Math.floor(S.minutes / 60)).padStart(2, '0')}:${String(S.minutes % 60).padStart(2, '0')}`;
 function renderInfo() {
+  $('#clock').textContent = clock();
+  $('#slider').value = S.minutes;
   const p = S.paths && S.paths.sel, info = $('#info'), name = MONTHS[S.month];
   if (!p) { info.innerHTML = '<small>Waiting for location…</small>'; return; }
-  const maxAlt = `max ${Math.round(p.noon.alt / D2R)}°`;
-  if (p.polar === 'night') info.innerHTML = `<b>${name} 21</b> · the sun doesn't rise<small>polar night</small>`;
-  else if (p.polar === 'day') info.innerHTML = `<b>${name} 21</b> · midnight sun · ${maxAlt}<small>the sun doesn't set</small>`;
+  const at = sunAt(selDate()), alt = Math.round(at.alt / D2R);
+  const where = alt >= 0 ? `sun ${dir(at.az)}, ${alt}° up` : `sun below the horizon (${dir(at.az)})`;
+  let day;
+  if (p.polar === 'night') day = "polar night, the sun doesn't rise";
+  else if (p.polar === 'day') day = `midnight sun · max ${Math.round(p.noon.alt / D2R)}°`;
   else {
     const len = (p.set - p.rise) / 6e4;
-    info.innerHTML = `<b>${name} 21</b> ↑ ${hm(p.rise)} ${dir(p.riseAz)} · ↓ ${hm(p.set)} ${dir(p.setAz)}` +
-      `<small>${Math.floor(len / 60)}h ${String(Math.round(len % 60)).padStart(2, '0')}m daylight · ${maxAlt} · <span style="color:var(--sun)">━</span> ${name} &nbsp;<span style="color:var(--today)">╍</span> today</small>`;
+    day = `↑ ${hm(p.rise)} ${dir(p.riseAz).split(' ')[0]} · ↓ ${hm(p.set)} ${dir(p.setAz).split(' ')[0]} · ${Math.floor(len / 60)}h ${String(Math.round(len % 60)).padStart(2, '0')}m`;
   }
+  info.innerHTML = `<b>${name} 21, ${clock()}</b> · ${where}<small>${day} · <span style="color:var(--sun)">━</span> ${name} <span style="color:var(--today)">╍</span> today</small>`;
 }
+$('#slider').oninput = e => { S.minutes = +e.target.value; renderInfo(); };
+$('#now').onclick = () => { S.minutes = nowMinutes(); renderInfo(); };
 function renderMonths() {
   const box = $('#months');
   box.innerHTML = MONTHS.map((m, i) => `<button data-m="${i}" aria-pressed="${i === S.month}">${m}</button>`).join('');

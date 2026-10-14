@@ -1,5 +1,5 @@
 // Network first, cache fallback: always fresh when online, still opens offline.
-const CACHE = 'sun-tracker-v1';
+const CACHE = 'sun-tracker-v2';
 const FILES = ['./', 'index.html', 'suncalc.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', e => {

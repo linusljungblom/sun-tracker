@@ -57,7 +57,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
   <button id="loc" class="pill" aria-label="Change location">📍 <span>Locating…</span></button>
   <button id="align" class="pill" hidden>🎯 Align</button>
 </div>
-<div id="hint" hidden><span class="pill">Tap the real sun to align the compass · <button id="reset">Reset</button></span></div>
+<div id="hint" hidden><span class="pill">Put the sun mid-screen and tap it · <button id="reset">Reset</button></span></div>
 
 <div id="bottom" class="bar">
   <div id="info"></div>
@@ -92,7 +92,7 @@ const S = {
   minutes: nowMinutes(),  // selected time of day
   mode: 'start',          // start | ar | flat
   R: null,                // smoothed device-to-world rotation matrix (row-major 3x3)
-  sensor: false, cam: false, offset: 0, aligning: false,
+  sensor: false, cam: false, offset: 0, tilt: 0, aligning: false, // offset/tilt: compass and tilt corrections from Align
   view: { h: 180, p: 25 }, // heading/pitch in flat mode
   paths: null,
 };
@@ -102,9 +102,10 @@ try {
   const saved = JSON.parse(localStorage.getItem('suntracker') || '{}');
   if (typeof saved.lat === 'number') { S.lat = saved.lat; S.lon = saved.lon; }
   if (typeof saved.offset === 'number') S.offset = saved.offset;
+  if (typeof saved.tilt === 'number') S.tilt = saved.tilt;
 } catch (e) {}
 function save() {
-  try { localStorage.setItem('suntracker', JSON.stringify({ lat: S.lat, lon: S.lon, offset: S.offset })); } catch (e) {}
+  try { localStorage.setItem('suntracker', JSON.stringify({ lat: S.lat, lon: S.lon, offset: S.offset, tilt: S.tilt })); } catch (e) {}
 }
 
 // ---------- sun ----------
@@ -165,8 +166,11 @@ function focal() {
 function project(v) {
   const R = S.R;
   const x = R[0]*v[0] + R[3]*v[1] + R[6]*v[2];
-  const y = R[1]*v[0] + R[4]*v[1] + R[7]*v[2];
-  const z = R[2]*v[0] + R[5]*v[1] + R[8]*v[2];
+  const y0 = R[1]*v[0] + R[4]*v[1] + R[7]*v[2];
+  const z0 = R[2]*v[0] + R[5]*v[1] + R[8]*v[2];
+  // tilt correction: rotate about the device's x axis (sensor pitch bias)
+  const t = S.mode === 'ar' ? S.tilt : 0, ct = Math.cos(t), st = Math.sin(t);
+  const y = y0*ct - z0*st, z = z0*ct + y0*st;
   const th = screenAngle(), c = Math.cos(th), s = Math.sin(th);
   const xs = x*c - y*s, ys = x*s + y*c;
   if (z > -0.05) return { behind: true, dx: xs, dy: -ys };
@@ -383,13 +387,31 @@ function begin(ar) {
 $('#go').onclick = () => begin(true);
 $('#flat').onclick = () => begin(false);
 
-// alignment: tap the real sun, correct the compass heading to match
+// alignment: tap the real sun; solve heading offset + tilt so the drawn sun lands on the tap
+function alignTo(px, py) {
+  const sun = sunAt(new Date());
+  const err = () => { const q = project(enu(sun.az, sun.alt)); return q.behind ? null : [q.x - px, q.y - py]; };
+  if (!err()) { const o = bearingAt(px, py) - sun.az; S.offset = Math.atan2(Math.sin(o), Math.cos(o)); S.tilt = 0; }
+  for (let i = 0; i < 12; i++) { // Newton's method, numerical Jacobian
+    const e0 = err(); if (!e0) return false;
+    if (Math.hypot(e0[0], e0[1]) < 0.5) return true;
+    const h = 1e-3;
+    S.offset += h; const eo = err(); S.offset -= h;
+    S.tilt += h; const et = err(); S.tilt -= h;
+    if (!eo || !et) return false;
+    const a = (eo[0] - e0[0]) / h, b = (et[0] - e0[0]) / h, c = (eo[1] - e0[1]) / h, d = (et[1] - e0[1]) / h, det = a*d - b*c;
+    if (Math.abs(det) < 1e-9) return false;
+    S.offset -= (d*e0[0] - b*e0[1]) / det;
+    S.tilt -= (a*e0[1] - c*e0[0]) / det;
+  }
+  return !!err();
+}
 $('#align').onclick = () => {
   if (S.lat == null) return toast('Set a location first');
   if (sunAt(new Date()).alt < 0) return toast('The sun is below the horizon right now');
   S.aligning = !S.aligning; $('#hint').hidden = !S.aligning;
 };
-$('#reset').onclick = () => { S.offset = 0; save(); S.aligning = false; $('#hint').hidden = true; toast('Alignment reset'); };
+$('#reset').onclick = () => { S.offset = 0; S.tilt = 0; save(); S.aligning = false; $('#hint').hidden = true; toast('Alignment reset'); };
 
 // pointer: tap to align (AR) or drag to look around (flat)
 let drag = null;
@@ -404,11 +426,13 @@ canvas.addEventListener('pointerup', e => {
   const moved = drag && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 8;
   drag = null;
   if (moved || !S.aligning || !S.R) return;
-  const sun = sunAt(new Date());
-  const off = bearingAt(e.clientX, e.clientY) - sun.az;
-  S.offset = Math.atan2(Math.sin(off), Math.cos(off));
-  save(); S.aligning = false; $('#hint').hidden = true;
-  toast(`Aligned (${Math.round(S.offset / D2R)}° correction)`);
+  const prev = [S.offset, S.tilt];
+  S.aligning = false; $('#hint').hidden = true;
+  if (!alignTo(e.clientX, e.clientY)) { [S.offset, S.tilt] = prev; return toast('Couldn’t align. Try again with the sun mid-screen'); }
+  S.offset = Math.atan2(Math.sin(S.offset), Math.cos(S.offset));
+  save();
+  const sd = Math.round(S.offset / D2R), td = Math.round(S.tilt / D2R);
+  toast(`Aligned (${sd}° sideways, ${td}° tilt)`);
 });
 
 addEventListener('resize', resize);

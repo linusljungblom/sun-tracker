@@ -92,7 +92,8 @@ const S = {
   minutes: nowMinutes(),  // selected time of day
   mode: 'start',          // start | ar | flat
   R: null,                // smoothed device-to-world rotation matrix (row-major 3x3)
-  sensor: false, cam: false, offset: 0, tilt: 0, aligning: false, // offset/tilt: compass and tilt corrections from Align
+  sensor: false, cam: false, aligning: false, anchor: null,
+  offset: 0, tilt: 0, fovScale: 1, // corrections from Align: compass, tilt, camera zoom
   view: { h: 180, p: 25 }, // heading/pitch in flat mode
   paths: null,
 };
@@ -103,9 +104,10 @@ try {
   if (typeof saved.lat === 'number') { S.lat = saved.lat; S.lon = saved.lon; }
   if (typeof saved.offset === 'number') S.offset = saved.offset;
   if (typeof saved.tilt === 'number') S.tilt = saved.tilt;
+  if (typeof saved.fovScale === 'number') S.fovScale = saved.fovScale;
 } catch (e) {}
 function save() {
-  try { localStorage.setItem('suntracker', JSON.stringify({ lat: S.lat, lon: S.lon, offset: S.offset, tilt: S.tilt })); } catch (e) {}
+  try { localStorage.setItem('suntracker', JSON.stringify({ lat: S.lat, lon: S.lon, offset: S.offset, tilt: S.tilt, fovScale: S.fovScale })); } catch (e) {}
 }
 
 // ---------- sun ----------
@@ -158,7 +160,7 @@ function focal() {
   if (S.mode === 'ar' && S.cam && video.videoWidth) {
     const vw = video.videoWidth, vh = video.videoHeight;
     const scale = Math.max(W / vw, H / vh); // object-fit: cover
-    return scale * (Math.max(vw, vh) / 2) / Math.tan(CAM_FOV / 2 * D2R);
+    return S.fovScale * scale * (Math.max(vw, vh) / 2) / Math.tan(CAM_FOV / 2 * D2R);
   }
   return (H / 2) / Math.tan(FLAT_FOV / 2 * D2R);
 }
@@ -408,9 +410,11 @@ function alignTo(px, py) {
 }
 // two steps: 'sun' (tap the sun: heading + tilt), then 'horizon' (drag the white line onto the real horizon: tilt only)
 function alignStep(step) {
+  if (step !== 'horizon') S.anchor = null;
   S.aligning = step; $('#hint').hidden = !step;
   if (!step) return;
-  $('#hintText').textContent = step === 'sun' ? 'Put the sun mid-screen and tap it' : 'Drag until the white line sits on the real horizon';
+  $('#hintText').textContent = step === 'sun' ? 'Put the sun mid-screen and tap it'
+    : S.anchor ? 'Drag the white line onto the real horizon (the sun stays put)' : 'Drag until the white line sits on the real horizon';
   $('#hintBtn').textContent = step === 'sun' ? 'Skip' : 'Done';
 }
 $('#align').onclick = () => {
@@ -420,15 +424,32 @@ $('#align').onclick = () => {
 };
 $('#hintBtn').onclick = () => {
   if (S.aligning === 'sun') return alignStep('horizon');
-  save(); alignStep(false); toast('Alignment saved');
+  save(); alignStep(false);
+  toast(`Alignment saved (camera view ${Math.round(2 * Math.atan(Math.tan(CAM_FOV / 2 * D2R) / S.fovScale) / D2R)}°)`);
 };
-$('#reset').onclick = () => { S.offset = 0; S.tilt = 0; save(); alignStep(false); toast('Alignment reset'); };
+$('#reset').onclick = () => { S.offset = 0; S.tilt = 0; S.fovScale = 1; save(); alignStep(false); toast('Alignment reset'); };
 
 // pointer: tap to align (AR) or drag to look around (flat)
+function sunDy(y) { // finger's vertical distance from the drawn sun
+  if (!S.R || S.lat == null) return 200;
+  const n = sunAt(new Date()), q = project(enu(n.az, n.alt));
+  return q.behind ? 200 : y - q.y;
+}
 let drag = null;
-canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, h: S.view.h, p: S.view.p, t: S.tilt }; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, h: S.view.h, p: S.view.p, t: S.tilt, k: S.fovScale, d: sunDy(e.clientY) }; canvas.setPointerCapture(e.pointerId); });
 canvas.addEventListener('pointermove', e => {
-  if (drag && S.aligning === 'horizon') S.tilt = drag.t - (e.clientY - drag.y) / F;
+  if (drag && S.aligning === 'horizon') {
+    const dy = e.clientY - drag.y;
+    if (!S.anchor) S.tilt = drag.t - dy / F; // no sun reference: shift everything
+    else {
+      // sun reference: zoom around the tapped sun so the grabbed point follows the finger, then re-lock the sun
+      // (re-solved with the phone's orientation at the moment the sun was tapped)
+      const d = Math.abs(drag.d) < 40 ? (drag.d < 0 ? -40 : 40) : drag.d;
+      S.fovScale = Math.max(0.5, Math.min(2, drag.k * (d + dy) / d));
+      F = focal();
+      const R = S.R; S.R = S.anchor.R; alignTo(S.anchor.x, S.anchor.y); S.R = R;
+    }
+  }
   if (!drag || S.mode !== 'flat') return;
   const k = FLAT_FOV / H;
   S.view.h = ((drag.h - (e.clientX - drag.x) * k) % 360 + 360) % 360;
@@ -442,6 +463,7 @@ canvas.addEventListener('pointerup', e => {
   const prev = [S.offset, S.tilt];
   if (!alignTo(e.clientX, e.clientY)) { [S.offset, S.tilt] = prev; return toast('Couldn’t align. Try again with the sun mid-screen'); }
   S.offset = Math.atan2(Math.sin(S.offset), Math.cos(S.offset));
+  S.anchor = { x: e.clientX, y: e.clientY, R: S.R.slice() };
   save(); alignStep('horizon');
 });
 

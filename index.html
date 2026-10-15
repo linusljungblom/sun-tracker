@@ -35,7 +35,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 #months button{flex:0 0 auto;min-width:52px;min-height:44px;border-radius:12px;background:var(--chip);font-weight:500;scroll-snap-align:center}
 #months button[aria-pressed=true]{background:var(--sun);color:#1a1200}
 #hint{position:fixed;top:calc(max(10px,env(safe-area-inset-top)) + 52px);left:16px;right:16px;text-align:center}
-#hint .pill{display:inline-flex}
+#hint .pill{display:inline-flex;flex-wrap:wrap;justify-content:center;border-radius:16px;padding:8px 14px}
 #hint button{text-decoration:underline;color:var(--muted)}
 #toast{position:fixed;left:16px;right:16px;top:40%;text-align:center;pointer-events:none;opacity:0;transition:opacity .3s}
 #toast.on{opacity:1}
@@ -57,7 +57,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
   <button id="loc" class="pill" aria-label="Change location">📍 <span>Locating…</span></button>
   <button id="align" class="pill" hidden>🎯 Align</button>
 </div>
-<div id="hint" hidden><span class="pill">Put the sun mid-screen and tap it · <button id="reset">Reset</button></span></div>
+<div id="hint" hidden><span class="pill"><span id="hintText"></span> · <button id="hintBtn"></button> · <button id="reset">Reset</button></span></div>
 
 <div id="bottom" class="bar">
   <div id="info"></div>
@@ -406,17 +406,29 @@ function alignTo(px, py) {
   }
   return !!err();
 }
+// two steps: 'sun' (tap the sun: heading + tilt), then 'horizon' (drag the white line onto the real horizon: tilt only)
+function alignStep(step) {
+  S.aligning = step; $('#hint').hidden = !step;
+  if (!step) return;
+  $('#hintText').textContent = step === 'sun' ? 'Put the sun mid-screen and tap it' : 'Drag until the white line sits on the real horizon';
+  $('#hintBtn').textContent = step === 'sun' ? 'Skip' : 'Done';
+}
 $('#align').onclick = () => {
+  if (S.aligning) { save(); return alignStep(false); }
   if (S.lat == null) return toast('Set a location first');
-  if (sunAt(new Date()).alt < 0) return toast('The sun is below the horizon right now');
-  S.aligning = !S.aligning; $('#hint').hidden = !S.aligning;
+  alignStep(sunAt(new Date()).alt > 0 ? 'sun' : 'horizon');
 };
-$('#reset').onclick = () => { S.offset = 0; S.tilt = 0; save(); S.aligning = false; $('#hint').hidden = true; toast('Alignment reset'); };
+$('#hintBtn').onclick = () => {
+  if (S.aligning === 'sun') return alignStep('horizon');
+  save(); alignStep(false); toast('Alignment saved');
+};
+$('#reset').onclick = () => { S.offset = 0; S.tilt = 0; save(); alignStep(false); toast('Alignment reset'); };
 
 // pointer: tap to align (AR) or drag to look around (flat)
 let drag = null;
-canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, h: S.view.h, p: S.view.p }; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, h: S.view.h, p: S.view.p, t: S.tilt }; canvas.setPointerCapture(e.pointerId); });
 canvas.addEventListener('pointermove', e => {
+  if (drag && S.aligning === 'horizon') S.tilt = drag.t - (e.clientY - drag.y) / F;
   if (!drag || S.mode !== 'flat') return;
   const k = FLAT_FOV / H;
   S.view.h = ((drag.h - (e.clientX - drag.x) * k) % 360 + 360) % 360;
@@ -425,14 +437,12 @@ canvas.addEventListener('pointermove', e => {
 canvas.addEventListener('pointerup', e => {
   const moved = drag && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 8;
   drag = null;
-  if (moved || !S.aligning || !S.R) return;
+  if (S.aligning === 'horizon' && moved) return save();
+  if (moved || S.aligning !== 'sun' || !S.R) return;
   const prev = [S.offset, S.tilt];
-  S.aligning = false; $('#hint').hidden = true;
   if (!alignTo(e.clientX, e.clientY)) { [S.offset, S.tilt] = prev; return toast('Couldn’t align. Try again with the sun mid-screen'); }
   S.offset = Math.atan2(Math.sin(S.offset), Math.cos(S.offset));
-  save();
-  const sd = Math.round(S.offset / D2R), td = Math.round(S.tilt / D2R);
-  toast(`Aligned (${sd}° sideways, ${td}° tilt)`);
+  save(); alignStep('horizon');
 });
 
 addEventListener('resize', resize);

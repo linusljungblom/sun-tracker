@@ -4,7 +4,7 @@ A tiny mobile web app that draws the sun's path over your phone's camera view, s
 
 **Open:** https://linusljungblom.github.io/sun-tracker/ in Chrome on Android, tap **Start AR**, and allow camera, location and motion sensors. Use *Add to Home screen* to install it as an app; it works offline after the first visit.
 
-**If the path looks off:** wave the phone in a figure-8 to calibrate the compass, or, when the sun is out, tap **Align**, put the sun in the middle of the screen and tap it. This corrects both the compass (sideways) and tilt (up/down) and is remembered on the phone.
+**If the path looks off:** wave the phone in a figure-8 to calibrate the compass, or, when the sun is out, tap **Align**, put the sun in the middle of the screen and tap it. This corrects the compass (sideways) and tilt (up/down). Then drag until the white line sits on a distant real horizon for a precise up/down fix, and tap Done. It is remembered on the phone.
 
 No camera or compass? *View without camera* shows the same paths on a painted sky; drag to look around.
 
